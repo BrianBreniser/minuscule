@@ -19,9 +19,9 @@ import Html exposing (..)
 import Html.Attributes exposing (..)
 import Html.Events exposing (..)
 import Html.Lazy exposing (lazy, lazy2)
-import Navigation exposing (Parser)
+import Navigation exposing (Location)
+import UrlParser exposing (Parser, top, oneOf, parseHash)
 import String
-import String.Extra
 import Todo.Task
 
 
@@ -29,22 +29,28 @@ import Todo.Task
 -- The full application state of our todo app.
 
 
+type Visibility
+    = All
+    | Active
+    | Completed
+
+
 type alias Model =
     { tasks : List Todo.Task.Model
     , field : String
     , uid : Int
-    , visibility : String
+    , visibility : Visibility
     }
 
 
 type alias Flags =
-    Maybe Model
+    Maybe (List Todo.Task.Model)
 
 
 emptyModel : Model
 emptyModel =
     { tasks = []
-    , visibility = "All"
+    , visibility = All
     , field = ""
     , uid = 0
     }
@@ -64,7 +70,8 @@ type Msg
     | UpdateTask ( Int, Todo.Task.Msg )
     | DeleteComplete
     | CheckAll Bool
-    | ChangeVisibility String
+    | ChangeVisibility Visibility
+    | SetVisibility Location
 
 
 
@@ -82,7 +89,7 @@ update msg model =
                 newModel =
                     { model | field = str }
             in
-                ( newModel, save model )
+                ( newModel, save model.tasks )
 
         Add ->
             let
@@ -99,7 +106,7 @@ update msg model =
                             , tasks = model.tasks ++ [ Todo.Task.init description model.uid ]
                         }
             in
-                ( newModel, save newModel )
+                ( newModel, save newModel.tasks )
 
         UpdateTask ( id, taskMsg ) ->
             let
@@ -114,10 +121,10 @@ update msg model =
             in
                 case taskMsg of
                     Todo.Task.Focus elementId ->
-                        newModel ! [ save newModel, focusTask elementId ]
+                        newModel ! [ save newModel.tasks, focusTask elementId ]
 
                     _ ->
-                        ( newModel, save newModel )
+                        ( newModel, save newModel.tasks )
 
         DeleteComplete ->
             let
@@ -126,7 +133,7 @@ update msg model =
                         | tasks = List.filter (not << .completed) model.tasks
                     }
             in
-                ( newModel, save newModel )
+                ( newModel, save newModel.tasks )
 
         CheckAll bool ->
             let
@@ -136,19 +143,22 @@ update msg model =
                 newModel =
                     { model | tasks = List.map updateTask model.tasks }
             in
-                ( newModel, save newModel )
+                ( newModel, save newModel.tasks )
 
         ChangeVisibility visibility ->
             let
                 newModel =
                     { model | visibility = visibility }
             in
-                ( newModel, save model )
+                ( newModel, save model.tasks )
+
+        SetVisibility location ->
+            ( setVisibility location model, Cmd.none )
 
 
 focusTask : String -> Cmd Msg
 focusTask elementId =
-    Task.perform (\_ -> NoOp) (\_ -> NoOp) (Dom.focus elementId)
+    Task.attempt (\_ -> NoOp) (Dom.focus elementId)
 
 
 
@@ -159,7 +169,8 @@ view : Model -> Html Msg
 view model =
     div
         [ class "todomvc-wrapper"
-        , style [ ( "visibility", "hidden" ) ]
+
+        -- , style [ ( "visibility", "hidden" ) ]
         ]
         [ section
             [ class "todoapp" ]
@@ -189,19 +200,18 @@ taskEntry task =
         ]
 
 
-taskList : String -> List Todo.Task.Model -> Html Msg
+taskList : Visibility -> List Todo.Task.Model -> Html Msg
 taskList visibility tasks =
     let
         isVisible todo =
             case visibility of
-                "Completed" ->
+                Completed ->
                     todo.completed
 
-                "Active" ->
+                Active ->
                     not todo.completed
 
-                -- "All"
-                _ ->
+                All ->
                     True
 
         allCompleted =
@@ -246,7 +256,7 @@ taskList visibility tasks =
             ]
 
 
-controls : String -> List Todo.Task.Model -> Html Msg
+controls : Visibility -> List Todo.Task.Model -> Html Msg
 controls visibility tasks =
     let
         tasksCompleted =
@@ -272,11 +282,11 @@ controls visibility tasks =
                 ]
             , ul
                 [ class "filters" ]
-                [ visibilitySwap "#/" "All" visibility
+                [ visibilitySwap "#/" All visibility
                 , text " "
-                , visibilitySwap "#/active" "Active" visibility
+                , visibilitySwap "#/active" Active visibility
                 , text " "
-                , visibilitySwap "#/completed" "Completed" visibility
+                , visibilitySwap "#/completed" Completed visibility
                 ]
             , button
                 [ class "clear-completed"
@@ -287,7 +297,7 @@ controls visibility tasks =
             ]
 
 
-visibilitySwap : String -> String -> String -> Html Msg
+visibilitySwap : String -> Visibility -> Visibility -> Html Msg
 visibilitySwap uri visibility actualVisibility =
     let
         className =
@@ -298,7 +308,7 @@ visibilitySwap uri visibility actualVisibility =
     in
         li
             [ onClick (ChangeVisibility visibility) ]
-            [ a [ class className, href uri ] [ text visibility ] ]
+            [ a [ class className, href uri ] [ text (toString visibility) ] ]
 
 
 infoFooter : Html msg
@@ -321,11 +331,10 @@ infoFooter =
 -- wire the entire application together
 
 
-main : Program Flags
+main : Program Never Model Msg
 main =
-    Navigation.programWithFlags urlParser
-        { urlUpdate = urlUpdate
-        , view = view
+    Navigation.program SetVisibility
+        { view = view
         , init = init
         , update = update
         , subscriptions = subscriptions
@@ -336,52 +345,35 @@ main =
 -- URL PARSERS - check out evancz/url-parser for fancier URL parsing
 
 
-toUrl : String -> String
-toUrl visibility =
-    "#/" ++ String.toLower visibility
-
-
-fromUrl : String -> Maybe String
-fromUrl hash =
-    let
-        cleanHash =
-            String.dropLeft 2 hash
-    in
-        if (List.member cleanHash [ "all", "active", "completed" ]) == True then
-            Just cleanHash
-        else
-            Nothing
-
-
-urlParser : Parser (Maybe String)
+urlParser : Parser (Visibility -> Visibility) Visibility
 urlParser =
-    Navigation.makeParser (fromUrl << .hash)
+    oneOf
+        [ UrlParser.map All top
+        , UrlParser.map Active (UrlParser.s "active")
+        , UrlParser.map Completed (UrlParser.s "completed")
+        ]
 
 
-{-| The URL is turned into a Maybe value. If the URL is valid, we just update
-our model with the new visibility settings. If it is not a valid URL,
-we set the visibility filter to show all tasks.
--}
-urlUpdate : Maybe String -> Model -> ( Model, Cmd Msg )
-urlUpdate result model =
-    case result of
-        Just visibility ->
-            update (ChangeVisibility (String.Extra.toSentenceCase visibility)) model
-
-        Nothing ->
-            update (ChangeVisibility "All") model
+setVisibility : Location -> Model -> Model
+setVisibility location model =
+    let
+        visibility =
+            parseHash urlParser location
+                |> Maybe.withDefault All
+    in
+        { model | visibility = visibility }
 
 
-init : Flags -> Maybe String -> ( Model, Cmd Msg )
-init flags url =
-    urlUpdate url (Maybe.withDefault emptyModel flags)
+init : Location -> ( Model, Cmd Msg )
+init location =
+    ( setVisibility location emptyModel, Cmd.none )
 
 
 
 -- interactions with localStorage
 
 
-port save : Model -> Cmd msg
+port save : List Todo.Task.Model -> Cmd msg
 
 
 subscriptions : Model -> Sub Msg
